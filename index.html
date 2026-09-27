@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Idea Web</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      color: #f4f1ff;
+      background: #11101a;
+    }
+    header {
+      position: fixed;
+      z-index: 5;
+      inset: 0 0 auto;
+      height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      background: #191725;
+      border-bottom: 1px solid #302b42;
+    }
+    h1 { margin: 0; font-size: 20px; }
+    #search {
+      width: min(280px, 55vw);
+      padding: 11px 14px;
+      color: white;
+      background: #252234;
+      border: 1px solid #49425f;
+      border-radius: 10px;
+      outline: none;
+    }
+    #search:focus { border-color: #a78bfa; }
+    #canvas {
+      position: fixed;
+      inset: 72px 0 0;
+      overflow: hidden;
+      background-image: radial-gradient(#373148 1px, transparent 1px);
+      background-size: 28px 28px;
+    }
+    #lines, #nodes {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+    #lines { pointer-events: none; }
+    .edge { stroke: #766b96; stroke-width: 2; }
+    .node {
+      position: absolute;
+      width: 150px;
+      min-height: 72px;
+      display: grid;
+      place-items: center;
+      padding: 12px;
+      text-align: center;
+      overflow-wrap: anywhere;
+      color: #fff;
+      background: #352d4c;
+      border: 2px solid #8b76bb;
+      border-radius: 18px;
+      cursor: grab;
+      user-select: none;
+      box-shadow: 0 8px 25px #0005;
+    }
+    .node.selected { border-color: #f0abfc; box-shadow: 0 0 0 4px #d946ef44; }
+    .node.hidden { opacity: .12; }
+    #addBranch {
+      position: fixed;
+      z-index: 6;
+      right: 24px;
+      bottom: 24px;
+      padding: 15px 20px;
+      color: #171221;
+      background: #c4b5fd;
+      border: 0;
+      border-radius: 16px;
+      font-size: 15px;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 8px 24px #0006;
+    }
+    dialog {
+      width: min(440px, calc(100vw - 32px));
+      padding: 24px;
+      color: #f4f1ff;
+      background: #201c2d;
+      border: 1px solid #514667;
+      border-radius: 16px;
+    }
+    dialog::backdrop { background: #080710bb; }
+    dialog h2 { margin-top: 0; }
+    dialog input, dialog textarea {
+      width: 100%;
+      margin: 7px 0 12px;
+      padding: 11px;
+      color: white;
+      background: #302a40;
+      border: 1px solid #514667;
+      border-radius: 8px;
+    }
+    dialog textarea { min-height: 90px; resize: vertical; }
+    .actions { display: flex; gap: 10px; justify-content: flex-end; }
+    .actions button {
+      padding: 10px 14px;
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .primary { background: #c4b5fd; }
+    .secondary { color: white; background: #454052; }
+    #details { margin: 14px 0; }
+    .item { padding: 10px 0; border-top: 1px solid #484157; overflow-wrap: anywhere; }
+    .item a { color: #c4b5fd; }
+    small { color: #b9b3c8; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Idea Web</h1>
+    <input id="search" type="search" placeholder="Search ideas…">
+  </header>
+
+  <main id="canvas">
+    <svg id="lines"></svg>
+    <div id="nodes"></div>
+  </main>
+
+  <button id="addBranch">＋ Add a branch</button>
+
+  <dialog id="ideaDialog">
+    <form id="ideaForm">
+      <h2 id="formTitle">New idea</h2>
+      <label>Idea name
+        <input id="ideaName" required maxlength="100" placeholder="e.g. Climate and cities">
+      </label>
+      <label>A note (optional)
+        <textarea id="ideaNote" placeholder="Add a thought or explanation"></textarea>
+      </label>
+      <label>Video or webpage link (optional)
+        <input id="ideaUrl" type="url" placeholder="https://…">
+      </label>
+      <label>Attach a PDF or video file (optional)
+        <input id="ideaFile" type="file" accept="application/pdf,video/*">
+      </label>
+      <div id="details"></div>
+      <div class="actions">
+        <button type="button" class="secondary" id="cancel">Cancel</button>
+        <button type="submit" class="primary">Save idea</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    const canvas = document.querySelector("#canvas");
+    const nodesLayer = document.querySelector("#nodes");
+    const svg = document.querySelector("#lines");
+    const dialog = document.querySelector("#ideaDialog");
+    const form = document.querySelector("#ideaForm");
+    const dbRequest = indexedDB.open("IdeaWebFiles", 1);
+
+    let db;
+    let ideas = JSON.parse(localStorage.getItem("idea-web") || "[]");
+    let selectedId = null;
+    let editingId = null;
+    let dragging = null;
+
+    dbRequest.onupgradeneeded = () => {
+      dbRequest.result.createObjectStore("files", { keyPath: "id" });
+    };
+    dbRequest.onsuccess = () => { db = dbRequest.result; };
+
+    function saveIdeas() {
+      localStorage.setItem("idea-web", JSON.stringify(ideas));
+    }
+
+    function render() {
+      nodesLayer.innerHTML = "";
+      svg.innerHTML = "";
+
+      for (const idea of ideas) {
+        for (const parentId of idea.parents || []) {
+          const parent = ideas.find(item => item.id === parentId);
+          if (!parent) continue;
+          const a = center(parent), b = center(idea);
+          const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          line.setAttribute("x1", a.x); line.setAttribute("y1", a.y);
+          line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
+          line.setAttribute("class", "edge");
+          svg.appendChild(line);
+        }
+      }
+
+      for (const idea of ideas) {
+        const node = document.createElement("button");
+        node.className = "node" + (idea.id === selectedId ? " selected" : "");
+        node.textContent = idea.name;
+        node.style.left = idea.x + "px";
+        node.style.top = idea.y + "px";
+        node.dataset.id = idea.id;
+        node.addEventListener("click", event => {
+          if (dragging?.moved) return;
+          selectedId = idea.id;
+          openIdea(idea);
+        });
+        node.addEventListener("pointerdown", startDrag);
+        nodesLayer.appendChild(node);
+      }
+      applySearch();
+    }
+
+    function center(idea) {
+      return { x: idea.x + 75, y: idea.y + 36 };
+    }
+
+    function startDrag(event) {
+      const idea = ideas.find(item => item.id === event.currentTarget.dataset.id);
+      dragging = {
+        idea, startX: event.clientX, startY: event.clientY,
+        x: idea.x, y: idea.y, moved: false
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.currentTarget.addEventListener("pointermove", moveDrag);
+      event.currentTarget.addEventListener("pointerup", endDrag, { once: true });
+    }
+
+    function moveDrag(event) {
+      if (!dragging) return;
+      const dx = event.clientX - dragging.startX;
+      const dy = event.clientY - dragging.startY;
+      if (Math.abs(dx) + Math.abs(dy) > 5) dragging.moved = true;
+      dragging.idea.x = Math.max(0, dragging.x + dx);
+      dragging.idea.y = Math.max(0, dragging.y + dy);
+      render();
+    }
+
+    function endDrag() {
+      if (dragging?.moved) saveIdeas();
+      setTimeout(() => { dragging = null; }, 0);
+    }
+
+    document.querySelector("#addBranch").addEventListener("click", () => {
+      editingId = null;
+      form.reset();
+      document.querySelector("#formTitle").textContent = "New idea";
+      document.querySelector("#details").innerHTML = selectedId
+        ? "<small>This idea will connect to the selected idea.</small>"
+        : "<small>Select an idea first if you want to connect this branch to it.</small>";
+      dialog.showModal();
+      document.querySelector("#ideaName").focus();
+    });
+
+    function openIdea(idea) {
+      editingId = idea.id;
+      document.querySelector("#formTitle").textContent = "Edit idea";
+      document.querySelector("#ideaName").value = idea.name;
+      document.querySelector("#ideaNote").value = idea.note || "";
+      document.querySelector("#ideaUrl").value = idea.url || "";
+      document.querySelector("#ideaFile").value = "";
+      document.querySelector("#details").innerHTML =
+        (idea.fileName ? "<small>Saved attachment: " + escapeHtml(idea.fileName) + "</small>" : "") +
+        "<small> Save to update the idea. Drag it to move it around the web.</small>";
+      dialog.showModal();
+    }
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const name = document.querySelector("#ideaName").value.trim();
+      const note = document.querySelector("#ideaNote").value.trim();
+      const url = document.querySelector("#ideaUrl").value.trim();
+      const file = document.querySelector("#ideaFile").files[0];
+
+      let idea = ideas.find(item => item.id === editingId);
+      if (!idea) {
+        idea = {
+          id: crypto.randomUUID(), name, note, url,
+          x: selectedId ? ideas.find(item => item.id === selectedId).x + 190 : 120,
+          y: selectedId ? ideas.find(item => item.id === selectedId).y + 110 : 120,
+          parents: selectedId ? [selectedId] : []
+        };
+        ideas.push(idea);
+      } else {
+        Object.assign(idea, { name, note, url });
+      }
+
+      if (file && db) {
+        idea.fileName = file.name;
+        await new Promise(resolve => {
+          const tx = db.transaction("files", "readwrite");
+          tx.objectStore("files").put({ id: idea.id, file });
+          tx.oncomplete = resolve;
+        });
+      }
+
+      saveIdeas();
+      dialog.close();
+      render();
+      selectedId = idea.id;
+    });
+
+    document.querySelector("#cancel").addEventListener("click", () => dialog.close());
+
+    function applySearch() {
+      const query = document.querySelector("#search").value.toLowerCase();
+      document.querySelectorAll(".node").forEach(node => {
+        const idea = ideas.find(item => item.id === node.dataset.id);
+        node.classList.toggle("hidden", query && !idea.name.toLowerCase().includes(query));
+      });
+    }
+    document.querySelector("#search").addEventListener("input", applySearch);
+
+    function escapeHtml(text) {
+      return text.replace(/[&<>"']/g, char => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      })[char]);
+    }
+
+    render();
+  </script>
+</body>
+</html>
